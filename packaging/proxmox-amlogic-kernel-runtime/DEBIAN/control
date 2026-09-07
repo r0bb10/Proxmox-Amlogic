@@ -1,0 +1,10 @@
+Package: proxmox-amlogic-kernel-runtime
+Version: 1.0
+Section: admin
+Priority: optional
+Architecture: all
+Depends: systemd
+Maintainer: r0bb10
+Description: Runtime cleanup support for Proxmox Amlogic kernels
+ Installs the post-boot cleanup service used by custom Proxmox kernels
+ on the X96 Max+ U-Boot boot layout.

@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+state=/var/lib/proxmox-amlogic/pending-kernel-cleanup
+dry_run=0
+
+if (($# == 1)) && [[ $1 == --dry-run ]]; then
+    dry_run=1
+elif (($# != 0)); then
+    printf 'usage: %s [--dry-run]\n' "$0" >&2
+    exit 2
+fi
+
+[[ -e $state ]] || exit 0
+
+expected_release=""
+declare -a purge_packages=()
+declare -A seen_packages=()
+
+while IFS= read -r line || [[ -n $line ]]; do
+    case "$line" in
+        expected_release=*)
+            [[ -z $expected_release ]] || exit 1
+            expected_release=${line#expected_release=}
+            [[ $expected_release =~ ^[0-9A-Za-z.+-]+$ ]] || exit 1
+            ;;
+        purge_package=*)
+            package=${line#purge_package=}
+            [[ $package =~ ^proxmox-kernel-[0-9A-Za-z.+-]+$ ]] || exit 1
+            [[ -z ${seen_packages[$package]:-} ]] || exit 1
+            seen_packages[$package]=1
+            purge_packages+=("$package")
+            ;;
+        *)
+            exit 1
+            ;;
+    esac
+done < "$state"
+
+[[ -n $expected_release && ${#purge_packages[@]} -gt 0 ]] || exit 1
+[[ $(uname -r) == "$expected_release" ]] || exit 0
+
+for service in pve-cluster pvedaemon pveproxy pvestatd; do
+    systemctl is-active --quiet "$service"
+done
+
+declare -a installed_packages=()
+for package in "${purge_packages[@]}"; do
+    status=$(dpkg-query -W -f='${db:Status-Status}' "$package" 2>/dev/null || true)
+    case "$status" in
+        installed)
+            release=${package#proxmox-kernel-}
+            marker=/usr/lib/proxmox-kernel/$release/.proxmox-amlogic-kernel
+            [[ $package != "proxmox-kernel-$expected_release" ]] || exit 1
+            dpkg-query -L "$package" | grep -Fx -- "$marker" >/dev/null
+            installed_packages+=("$package")
+            ;;
+        not-installed|unknown|'')
+            ;;
+        *)
+            exit 1
+            ;;
+    esac
+done
+
+if ((dry_run)); then
+    printf 'Would purge: %s\n' "${installed_packages[*]}"
+    exit 0
+fi
+
+if ((${#installed_packages[@]})); then
+    dpkg --purge -- "${installed_packages[@]}"
+fi
+rm -f "$state"

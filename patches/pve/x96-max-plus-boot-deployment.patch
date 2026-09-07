@@ -1,0 +1,155 @@
+diff --git a/debian/control.in b/debian/control.in
+index b7048b6..7925c23 100644
+--- a/debian/control.in
++++ b/debian/control.in
+@@ -66,7 +66,7 @@ Package: proxmox-kernel-@KVNAME@
+ Architecture: any
+ Provides: linux-image-@KVNAME@-@ARCH@, pve-kernel-@KVNAME@
+ Suggests: pve-firmware,
+-Depends: busybox, initramfs-tools | linux-initramfs-tool, ${misc:Depends},
++Depends: busybox, initramfs-tools | linux-initramfs-tool, u-boot-tools, ${misc:Depends},
+ Recommends: @GRUB_RECOMMENDS@,
+ Description: Proxmox Kernel Image
+  This package contains the linux kernel and initial ramdisk used for booting
+diff --git a/debian/proxmox-kernel.postinst.in b/debian/proxmox-kernel.postinst.in
+index d35dad5..2ca0707 100755
+--- a/debian/proxmox-kernel.postinst.in
++++ b/debian/proxmox-kernel.postinst.in
+@@ -15,10 +15,68 @@ my $version = "@@KVNAME@@";
+ 
+ system("depmod $version");
+ 
+-if (-d "/etc/kernel/postinst.d") {
++my $kernel_dir = "/usr/lib/proxmox-kernel/$version";
++my $dtb = "$kernel_dir/meson-sm1-x96-max-plus.dtb";
++my $image = "$kernel_dir/Image";
++my $kernel = "$kernel_dir/vmlinuz-$version";
++my $staging_dir = "/var/lib/proxmox-kernel/$version";
++my $initrd = "$staging_dir/initrd.img-$version";
++
++# This board boots a FAT /boot partition through U-Boot's uEnv.txt, not the
++# conventional boot layout used by stock PVE arm64 installations. Keep
++# package files and generated staging data on ext4; FAT receives only the
++# three runtime payloads named by uEnv.txt.
++if (-e "$imagedir/uEnv.txt" && -d "$imagedir/dtb/amlogic") {
++  die "Missing kernel image for $version\n" unless -s $kernel;
++  die "Missing X96 Max+ DTB for $version\n" unless -s $dtb;
++  die "Missing raw ARM64 Image for $version\n" unless -s $image;
++  system("install", "-d", "-m", "0755", $staging_dir)
++      && die "Failed to create initramfs staging directory\n";
++  unlink $initrd;
++  system("update-initramfs", "-c", "-k", $version, "-b", $staging_dir)
++      && die "Failed to create initramfs for $version\n";
++  die "Missing generated initramfs for $version\n" unless -s $initrd;
++
++  system(
++      "mkimage", "-A", "arm", "-O", "linux", "-T", "ramdisk", "-C", "none",
++      "-d", $initrd, "$imagedir/uInitrd",
++  ) && die "Failed to create $imagedir/uInitrd\n";
++  system("install", "-m", "0644", $image, "$imagedir/zImage")
++      && die "Failed to deploy zImage\n";
++  system("install", "-m", "0644", $dtb, "$imagedir/dtb/amlogic/meson-sm1-x96-max-plus.dtb")
++      && die "Failed to deploy X96 Max+ DTB\n";
++
++  my @purge_packages;
++  open(my $packages, "-|", "dpkg-query", "-W", "-f=\${Package}\t\${db:Status-Status}\n", "proxmox-kernel-*")
++      or die "Failed to query installed kernel packages\n";
++  while (<$packages>) {
++      chomp;
++      my ($package, $status) = split /\t/, $_, 2;
++      next unless $status eq "installed";
++      next if $package eq "proxmox-kernel-$version";
++      next unless $package =~ /^proxmox-kernel-([0-9A-Za-z.+-]+)$/;
++      next unless -e "/usr/lib/proxmox-kernel/$1/.proxmox-amlogic-kernel";
++      push @purge_packages, $package;
++  }
++  close($packages) or die "Failed to query installed kernel packages\n";
++
++  # The cleanup service is installed by this project's image, but the kernel
++  # package must remain usable on other systems.
++  if (@purge_packages && -x "/usr/lib/proxmox-amlogic/kernel-cleanup") {
++      my $state_dir = "/var/lib/proxmox-amlogic";
++      my $state = "$state_dir/pending-kernel-cleanup";
++      mkdir $state_dir unless -d $state_dir;
++      chmod 0755, $state_dir;
++      open(my $marker, ">", "$state.$$") or die "Failed to create cleanup marker\n";
++      print {$marker} "expected_release=$version\n";
++      print {$marker} "purge_package=$_\n" for @purge_packages;
++      close($marker) or die "Failed to write cleanup marker\n";
++      rename "$state.$$", $state or die "Failed to activate cleanup marker\n";
++  }
++} elsif (-d "/etc/kernel/postinst.d") {
+   print STDERR "Examining /etc/kernel/postinst.d.\n";
+   system(
+-      "run-parts --verbose --exit-on-error --arg=$version --arg=$imagedir/vmlinuz-$version /etc/kernel/postinst.d"
++      "run-parts --verbose --exit-on-error --arg=$version --arg=$kernel /etc/kernel/postinst.d"
+   ) && die "Failed to process /etc/kernel/postinst.d";
+ }
+ 
+ exit 0
+diff --git a/debian/proxmox-kernel.postrm.in b/debian/proxmox-kernel.postrm.in
+index 019d5e9..ef64eeb 100644
+--- a/debian/proxmox-kernel.postrm.in
++++ b/debian/proxmox-kernel.postrm.in
+@@ -10,15 +10,19 @@ my $imagedir = "/boot";
+ 
+ my $version = "@@KVNAME@@";
+ 
++my $kernel_dir = "/usr/lib/proxmox-kernel/$version";
++my $staging_dir = "/var/lib/proxmox-kernel/$version";
++
+-if (-d "/etc/kernel/postrm.d") {
++if (!(-e "$imagedir/uEnv.txt" && -d "$imagedir/dtb/amlogic") && -d "/etc/kernel/postrm.d") {
+   print STDERR "Examining /etc/kernel/postrm.d.\n";
+   system (
+-      "run-parts --verbose --exit-on-error --arg=$version --arg=$imagedir/vmlinuz-$version /etc/kernel/postrm.d"
++      "run-parts --verbose --exit-on-error --arg=$version --arg=$kernel_dir/vmlinuz-$version /etc/kernel/postrm.d"
+   ) && die "Failed to process /etc/kernel/postrm.d";
+ }
+ 
+-unlink "$imagedir/initrd.img-$version";
+-unlink "$imagedir/initrd.img-$version.bak";
++unlink "$staging_dir/initrd.img-$version";
++unlink "$staging_dir/initrd.img-$version.bak";
++rmdir $staging_dir;
+ unlink "/var/lib/initramfs-tools/$version";
+ 
+ # Ignore all invocations except when called on to purge.
+diff --git a/debian/proxmox-kernel.prerm.in b/debian/proxmox-kernel.prerm.in
+index d17669d..44d1f66 100755
+--- a/debian/proxmox-kernel.prerm.in
++++ b/debian/proxmox-kernel.prerm.in
+@@ -16,7 +16,7 @@ my $version = "@@KVNAME@@";
+-if (-d "/etc/kernel/prerm.d") {
++if (!(-e "$imagedir/uEnv.txt" && -d "$imagedir/dtb/amlogic") && -d "/etc/kernel/prerm.d") {
+   print STDERR "Examining /etc/kernel/prerm.d.\n";
+   system(
+-      "run-parts --verbose --exit-on-error --arg=$version --arg=$imagedir/vmlinuz-$version /etc/kernel/prerm.d"
++      "run-parts --verbose --exit-on-error --arg=$version --arg=/usr/lib/proxmox-kernel/$version/vmlinuz-$version /etc/kernel/prerm.d"
+   ) && die "Failed to process /etc/kernel/prerm.d";
+ }
+ 
+diff --git a/debian/rules b/debian/rules
+index 71f9804..981eda3 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -92,10 +92,15 @@ binary: install
+ 
+ .install_mark: .compile_mark .modules_compile_mark
+ 	rm -rf debian/$(PMX_KERNEL_PKG)
+ 	mkdir -p debian/$(PMX_KERNEL_PKG)/usr/lib/modules/$(KVNAME)
+-	mkdir debian/$(PMX_KERNEL_PKG)/boot
+-	install -m 644 $(KERNEL_SRC)/.config debian/$(PMX_KERNEL_PKG)/boot/config-$(KVNAME)
+-	install -m 644 $(KERNEL_SRC)/System.map debian/$(PMX_KERNEL_PKG)/boot/System.map-$(KVNAME)
+-	install -m 644 $(KERNEL_SRC)/$(KERNEL_IMAGE_PATH) debian/$(PMX_KERNEL_PKG)/boot/$(KERNEL_INSTALL_FILE)-$(KVNAME)
++	install -d -m 0755 debian/$(PMX_KERNEL_PKG)/usr/lib/proxmox-kernel/$(KVNAME)
++	install -m 644 $(KERNEL_SRC)/.config debian/$(PMX_KERNEL_PKG)/usr/lib/proxmox-kernel/$(KVNAME)/config-$(KVNAME)
++	install -m 644 $(KERNEL_SRC)/System.map debian/$(PMX_KERNEL_PKG)/usr/lib/proxmox-kernel/$(KVNAME)/System.map-$(KVNAME)
++	install -m 644 $(KERNEL_SRC)/$(KERNEL_IMAGE_PATH) debian/$(PMX_KERNEL_PKG)/usr/lib/proxmox-kernel/$(KVNAME)/$(KERNEL_INSTALL_FILE)-$(KVNAME)
++	install -m 644 $(KERNEL_SRC)/arch/arm64/boot/Image \
++		debian/$(PMX_KERNEL_PKG)/usr/lib/proxmox-kernel/$(KVNAME)/Image
++	install -m 644 $(KERNEL_SRC)/arch/arm64/boot/dts/amlogic/meson-sm1-x96-max-plus.dtb \
++		debian/$(PMX_KERNEL_PKG)/usr/lib/proxmox-kernel/$(KVNAME)/meson-sm1-x96-max-plus.dtb
++	touch debian/$(PMX_KERNEL_PKG)/usr/lib/proxmox-kernel/$(KVNAME)/.proxmox-amlogic-kernel
+ 	$(MAKE) -C $(KERNEL_SRC) INSTALL_MOD_PATH=$(BUILD_DIR)/debian/$(PMX_KERNEL_PKG)/usr/ modules_install
+ 	# install zfs drivers

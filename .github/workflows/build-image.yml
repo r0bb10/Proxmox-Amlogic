@@ -1,0 +1,188 @@
+name: Build PVE Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_release:
+        description: Optional kernel GitHub release tag; defaults to the latest release
+        required: false
+        default: ''
+        type: string
+
+concurrency:
+  group: pve-amlogic-image
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    outputs:
+      pve_version: ${{ steps.pve.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Resolve kernel release
+        id: kernel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          release="${{ inputs.kernel_release }}"
+          if [ -z "$release" ]; then
+            release="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"
+          fi
+          printf 'release=%s\n' "$release" >> "$GITHUB_OUTPUT"
+
+      - name: Download kernel package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir kernel
+          gh release download "${{ steps.kernel.outputs.release }}" --pattern 'proxmox-kernel-*_arm64.deb' --dir kernel
+          shopt -s nullglob
+          packages=(kernel/proxmox-kernel-*_arm64.deb)
+          if [ "${#packages[@]}" -ne 1 ]; then
+            echo "FATAL: expected one ARM64 proxmox-kernel package, found ${#packages[@]}" >&2
+            exit 1
+          fi
+          if [ "$(dpkg-deb -f "${packages[0]}" Architecture)" != arm64 ]; then
+            echo "FATAL: downloaded kernel package is not ARM64" >&2
+            exit 1
+          fi
+          printf 'KERNEL_DEB=%s\n' "${packages[0]}" >> "$GITHUB_ENV"
+
+      - name: Install image build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y debootstrap dosfstools e2fsprogs parted rsync u-boot-tools zstd
+
+      - name: Build kernel runtime package
+        run: |
+          mkdir runtime
+          bash tools/build-kernel-runtime.sh \
+            --output runtime/proxmox-amlogic-kernel-runtime_1.0_all.deb
+
+      - name: Bootstrap root filesystem
+        run: |
+          sudo bash tools/build-pve-image.sh \
+            --kernel-deb "$KERNEL_DEB" \
+            --runtime-deb runtime/proxmox-amlogic-kernel-runtime_1.0_all.deb \
+            --output dist/proxmox-ve-amlogic.img \
+            --stage bootstrap \
+            --reset
+
+      - name: Install Proxmox VE packages
+        run: |
+          sudo bash tools/build-pve-image.sh \
+            --kernel-deb "$KERNEL_DEB" \
+            --runtime-deb runtime/proxmox-amlogic-kernel-runtime_1.0_all.deb \
+            --output dist/proxmox-ve-amlogic.img \
+            --stage proxmox
+
+      - name: Record installed PVE version
+        id: pve
+        run: |
+          set -euo pipefail
+          version="$(
+            sudo chroot "$GITHUB_WORKSPACE/.dev/image-build/rootfs" \
+              dpkg-query -W -f='${Version}' pve-manager
+          )"
+          [ -n "$version" ]
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf 'IMAGE_NAME=proxmox-ve-amlogic-%s\n' "$version" >> "$GITHUB_ENV"
+
+      - name: Configure image root filesystem
+        run: |
+          sudo bash tools/build-pve-image.sh \
+            --kernel-deb "$KERNEL_DEB" \
+            --runtime-deb runtime/proxmox-amlogic-kernel-runtime_1.0_all.deb \
+            --output "dist/$IMAGE_NAME.img" \
+            --stage configure
+
+      - name: Assemble raw disk image
+        run: |
+          sudo bash tools/build-pve-image.sh \
+            --kernel-deb "$KERNEL_DEB" \
+            --runtime-deb runtime/proxmox-amlogic-kernel-runtime_1.0_all.deb \
+            --output "dist/$IMAGE_NAME.img" \
+            --stage assemble
+
+      - name: Compress disk image
+        run: |
+          sudo bash tools/build-pve-image.sh \
+            --kernel-deb "$KERNEL_DEB" \
+            --runtime-deb runtime/proxmox-amlogic-kernel-runtime_1.0_all.deb \
+            --output "dist/$IMAGE_NAME.img" \
+            --stage compress
+
+      - name: Upload image artifact
+        if: ${{ always() && steps.pve.outputs.version != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: proxmox-ve-amlogic-${{ steps.pve.outputs.version }}
+          path: dist/proxmox-ve-amlogic-${{ steps.pve.outputs.version }}.img.zst
+          if-no-files-found: warn
+          retention-days: 14
+          # The image is already compressed with zstd.
+          compression-level: 0
+
+  validate:
+    needs: build
+    if: ${{ needs.build.result == 'success' }}
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: proxmox-ve-amlogic-${{ needs.build.outputs.pve_version }}
+          path: image
+
+      - name: Validate U-Boot image payload
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq parted zstd
+          image="$(mktemp --suffix=.img)"
+          boot="$(mktemp -d)"
+          root="$(mktemp -d)"
+          loop=""
+          cleanup() {
+            sudo umount "$boot" "$root" 2>/dev/null || true
+            [ -z "$loop" ] || sudo losetup -d "$loop" 2>/dev/null || true
+            rm -rf "$boot" "$root" "$image"
+          }
+          trap cleanup EXIT
+          zstd -q -t image/proxmox-ve-amlogic-${{ needs.build.outputs.pve_version }}.img.zst
+          zstd -q -d -f image/proxmox-ve-amlogic-${{ needs.build.outputs.pve_version }}.img.zst -o "$image"
+          (( $(stat --format=%s "$image") % 512 == 0 ))
+          loop="$(sudo losetup -Pf --show "$image")"
+          for _ in {1..10}; do
+            [ -b "${loop}p1" ] && [ -b "${loop}p2" ] && break
+            sudo partprobe "$loop"
+            sleep 1
+          done
+          [ -b "${loop}p1" ] && [ -b "${loop}p2" ]
+          sudo mount "${loop}p1" "$boot"
+          sudo mount "${loop}p2" "$root"
+          test "$(sudo blkid -s TYPE -o value "${loop}p1")" = vfat
+          test "$(sudo blkid -s LABEL -o value "${loop}p1")" = BOOT
+          test "$(sudo blkid -s TYPE -o value "${loop}p2")" = ext4
+          test "$(sudo blkid -s LABEL -o value "${loop}p2")" = rootfs
+          root_uuid="$(sudo blkid -s UUID -o value "${loop}p2")"
+          test -s "$boot/zImage"
+          test "$(dd if="$boot/zImage" bs=1 skip=56 count=4 status=none | od -An -tx1 | tr -d '[:space:]')" = 41524d64
+          test -s "$boot/uInitrd"
+          test "$(dd if="$boot/uInitrd" bs=1 count=4 status=none | od -An -tx1 | tr -d '[:space:]')" = 27051956
+          test -s "$boot/dtb/amlogic/meson-sm1-x96-max-plus.dtb"
+          test -s "$boot/uEnv.txt"
+          grep -qF "root=UUID=$root_uuid " "$boot/uEnv.txt"
+          test -x "$root/usr/sbin/install-to-emmc"
+          test -s "$root/etc/fstab"
+          grep -qFx "UUID=$root_uuid / ext4 defaults,noatime 0 1" "$root/etc/fstab"
+          test -s "$root/etc/hostname"

@@ -1,0 +1,12 @@
+[Unit]
+Description=Remove superseded Proxmox Amlogic kernel after successful boot
+ConditionPathExists=/var/lib/proxmox-amlogic/pending-kernel-cleanup
+After=network-online.target pve-cluster.service pvedaemon.service pveproxy.service pvestatd.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/proxmox-amlogic/kernel-cleanup
+
+[Install]
+WantedBy=multi-user.target

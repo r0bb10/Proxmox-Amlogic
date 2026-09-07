@@ -1,0 +1,214 @@
+name: Build PVE Kernel
+
+on:
+  schedule:
+    # Poll git.proxmox.com for a new pve-kernel release daily. The build is
+    # skipped unless the resolved version is not yet published in this repo.
+    - cron: '22 03 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild even if this version already released
+        type: boolean
+        default: false
+      pve_head:
+        description: 'Optional pve-kernel commit SHA to build (default: latest release commit)'
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pve-arm64-kernel
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      build: ${{ steps.detect.outputs.build }}
+      pve_version: ${{ steps.detect.outputs.PVE_VERSION }}
+      pve_head: ${{ steps.detect.outputs.PVE_HEAD }}
+    steps:
+      - name: Resolve PVE release
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PVE_HEAD_INPUT: ${{ inputs.pve_head }}
+        run: |
+          set -euo pipefail
+          PVE_GIT_URL="https://git.proxmox.com/git/pve-kernel.git"
+          PVE_HEAD="${PVE_HEAD_INPUT}"
+          if [ -z "${PVE_HEAD}" ]; then
+            PVE_HEAD="$(git ls-remote "${PVE_GIT_URL}" HEAD | awk '{print $1}')"
+          fi
+          CLONE="${RUNNER_TEMP}/pve-lite"
+          git clone --quiet --depth 1 --no-tags "${PVE_GIT_URL}" "${CLONE}"
+          if [ "$(git -C "${CLONE}" rev-parse HEAD)" != "${PVE_HEAD}" ]; then
+            git -C "${CLONE}" fetch --quiet --depth 1 origin "${PVE_HEAD}"
+            git -C "${CLONE}" checkout --quiet FETCH_HEAD
+          fi
+          KERNEL_MAJ="$(sed -n 's/^KERNEL_MAJ=//p' "${CLONE}/Makefile")"
+          KERNEL_MIN="$(sed -n 's/^KERNEL_MIN=//p' "${CLONE}/Makefile")"
+          KERNEL_PATCHLEVEL="$(sed -n 's/^KERNEL_PATCHLEVEL=//p' "${CLONE}/Makefile")"
+          KERNEL_VER="${KERNEL_MAJ}.${KERNEL_MIN}.${KERNEL_PATCHLEVEL}"
+          KREL="$(sed -n 's/^KREL=//p' "${CLONE}/Makefile")"
+          KREL_EXTRA="$(sed -n 's/^KREL_EXTRA=//p' "${CLONE}/Makefile")"
+          PVE_VERSION="${KERNEL_VER}-${KREL}${KREL_EXTRA}-pve"
+          echo "KERNEL_VER=${KERNEL_VER}" >> "${GITHUB_OUTPUT}"
+          echo "PVE_VERSION=${PVE_VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "PVE_HEAD=${PVE_HEAD}" >> "${GITHUB_OUTPUT}"
+          FORCE="${{ inputs.force && '1' || '0' }}"
+          if [ "${FORCE}" != "1" ] && gh release view "${PVE_VERSION}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "::notice:: ${PVE_VERSION} already published; nothing to do."
+            echo "build=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          echo "build=true" >> "${GITHUB_OUTPUT}"
+
+  preflight:
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Verify PVE packaging patch
+        env:
+          PVE_HEAD: ${{ needs.resolve.outputs.pve_head }}
+        run: |
+          set -euo pipefail
+          source="${RUNNER_TEMP}/pve-kernel"
+          git clone --quiet --depth 1 --no-tags https://git.proxmox.com/git/pve-kernel.git "${source}"
+          if [ "$(git -C "${source}" rev-parse HEAD)" != "${PVE_HEAD}" ]; then
+            git -C "${source}" fetch --quiet --depth 1 origin "${PVE_HEAD}"
+            git -C "${source}" checkout --quiet FETCH_HEAD
+          fi
+          git -C "${source}" apply --check "${GITHUB_WORKSPACE}/patches/pve/x96-max-plus-boot-deployment.patch"
+
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 360
+    env:
+      WORK_DIR: ${{ github.workspace }}/work
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Build native ARM64 packages
+        run: |
+          docker run --rm \
+            --platform linux/arm64 \
+            --volume "${GITHUB_WORKSPACE}:/workspace" \
+            --workdir /workspace \
+            --env WORK_DIR=/workspace/work \
+            --env PVE_HEAD="${{ needs.resolve.outputs.pve_head }}" \
+            debian:trixie \
+            bash -euo pipefail -c '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -y -qq \
+                build-essential ca-certificates devscripts dh-python equivs git patch python3 sphinx-common
+              git config --global --add safe.directory /workspace
+              bash tools/build-pve-kernel.sh
+            '
+
+      - name: Upload build artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: pve-kernel-${{ needs.resolve.outputs.pve_version }}-arm64
+          path: ${{ github.workspace }}/work/pve-kernel/proxmox-kernel-${{ needs.resolve.outputs.pve_version }}_*_arm64.deb
+          if-no-files-found: warn
+          retention-days: 14
+
+  validate:
+    needs: [resolve, build]
+    if: ${{ needs.resolve.outputs.build == 'true' && needs.build.result == 'success' }}
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Download kernel package
+        uses: actions/download-artifact@v8
+        with:
+          name: pve-kernel-${{ needs.resolve.outputs.pve_version }}-arm64
+          path: kernel
+
+      - name: Validate raw ARM64 Image
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          packages=(kernel/proxmox-kernel-[0-9]*_arm64.deb)
+          if [ "${#packages[@]}" -ne 1 ]; then
+            echo "FATAL: expected one ARM64 proxmox-kernel package" >&2
+            exit 1
+          fi
+          contents="$(mktemp)"
+          trap 'rm -f "${contents}"' EXIT
+          dpkg-deb --contents "${packages[0]}" > "${contents}"
+          if rg -q ' \./boot/(vmlinuz|System\.map|config)-' "${contents}"; then
+            echo "FATAL: package must not own versioned files under /boot" >&2
+            exit 1
+          fi
+          image_path="$(
+            dpkg-deb --fsys-tarfile "${packages[0]}" \
+              | tar -t --wildcards './usr/lib/proxmox-kernel/*/Image'
+          )"
+          if [ -z "${image_path}" ] || [ "$(printf '%s\n' "${image_path}" | wc -l)" -ne 1 ]; then
+            echo "FATAL: expected one raw ARM64 Image in the package" >&2
+            exit 1
+          fi
+          image_file="$(mktemp)"
+          trap 'rm -f "${contents}" "${image_file}"' EXIT
+          dpkg-deb --fsys-tarfile "${packages[0]}" \
+            | tar -xOf - "${image_path}" > "${image_file}"
+          image_magic="$(
+            dd if="${image_file}" bs=1 skip=56 count=4 status=none \
+              | od -An -tx1 \
+              | tr -d '[:space:]'
+          )"
+          if [ "${image_magic}" != "41524d64" ]; then
+            echo "FATAL: packaged raw ARM64 Image is missing or has invalid ARMd magic" >&2
+            exit 1
+          fi
+
+  publish:
+    needs: [resolve, preflight, build, validate]
+    if: ${{ needs.resolve.outputs.build == 'true' && needs.preflight.result == 'success' && needs.build.result == 'success' && needs.validate.result == 'success' }}
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Download kernel package
+        uses: actions/download-artifact@v8
+        with:
+          name: pve-kernel-${{ needs.resolve.outputs.pve_version }}-arm64
+          path: kernel
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          PVE_VERSION="${{ needs.resolve.outputs.pve_version }}"
+          notes="${RUNNER_TEMP}/kernel-release-notes.md"
+          cat > "${notes}" <<'EOF'
+          Custom ARM64 Proxmox VE kernel for the X96 Max+.
+
+          - Board: AMedia X96 Max+ / Amlogic S905X3
+          - Includes the X96 Max+ device tree and U-Boot boot deployment support
+          - Install with: `apt install ./proxmox-kernel-*_arm64.deb`
+          EOF
+          if gh release view "${PVE_VERSION}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release delete "${PVE_VERSION}" --repo "${GITHUB_REPOSITORY}" --cleanup-tag --yes
+          fi
+          gh release create \
+            "${PVE_VERSION}" \
+            "kernel/proxmox-kernel-${PVE_VERSION}_"*_arm64.deb \
+            --repo "${{ github.repository }}" \
+            --target "${GITHUB_SHA}" \
+            --title "${PVE_VERSION}" \
+            --notes-file "${notes}"
