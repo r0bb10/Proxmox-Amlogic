@@ -174,7 +174,15 @@ configure() {
     release=$(basename "${modules[0]}")
     image="$rootfs/usr/lib/proxmox-kernel/$release/Image"
     [[ -s "$image" ]] || die "raw ARM64 Image missing for $release"
-    [[ -s "$rootfs/var/lib/proxmox-kernel/$release/initrd.img-$release" ]] || die "initramfs missing for $release"
+    initrd="$rootfs/var/lib/proxmox-kernel/$release/initrd.img-$release"
+    if [[ ! -s "$initrd" ]]; then
+        # Package installation precedes creation of the U-Boot FAT /boot layout.
+        # The normal post-install hook writes beside its kernel argument on ext4.
+        source_initrd="$rootfs/usr/lib/proxmox-kernel/$release/initrd.img-$release"
+        [[ -s "$source_initrd" ]] || die "initramfs missing for $release"
+        mkdir -p "$(dirname "$initrd")"
+        mv "$source_initrd" "$initrd"
+    fi
     dtb="$rootfs/usr/lib/proxmox-kernel/$release/meson-sm1-x96-max-plus.dtb"
     [[ -s "$dtb" ]] || die "kernel DTB missing for $release"
     [[ -s "$state/root-uuid" ]] || cat /proc/sys/kernel/random/uuid > "$state/root-uuid"
