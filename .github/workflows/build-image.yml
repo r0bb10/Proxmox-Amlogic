@@ -21,6 +21,7 @@ jobs:
       contents: read
     outputs:
       pve_version: ${{ steps.pve.outputs.version }}
+      kernel_release: ${{ steps.kernel.outputs.release }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -58,7 +59,7 @@ jobs:
       - name: Install image build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y debootstrap dosfstools e2fsprogs parted rsync u-boot-tools zstd
+          sudo apt-get install -y debootstrap dosfstools e2fsprogs parted rsync u-boot-tools
 
       - name: Build kernel runtime package
         run: |
@@ -124,10 +125,10 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: proxmox-ve-amlogic-${{ steps.pve.outputs.version }}
-          path: dist/proxmox-ve-amlogic-${{ steps.pve.outputs.version }}.img.zst
+          path: dist/proxmox-ve-amlogic-${{ steps.pve.outputs.version }}.img.gz
           if-no-files-found: warn
           retention-days: 14
-          # The image is already compressed with zstd.
+          # The image is already compressed with gzip.
           compression-level: 0
 
   validate:
@@ -147,7 +148,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq parted zstd
+          sudo apt-get install -y -qq parted
           image="$(mktemp --suffix=.img)"
           boot="$(mktemp -d)"
           root="$(mktemp -d)"
@@ -158,8 +159,8 @@ jobs:
             rm -rf "$boot" "$root" "$image"
           }
           trap cleanup EXIT
-          zstd -q -t image/proxmox-ve-amlogic-${{ needs.build.outputs.pve_version }}.img.zst
-          zstd -q -d -f image/proxmox-ve-amlogic-${{ needs.build.outputs.pve_version }}.img.zst -o "$image"
+          gzip -t image/proxmox-ve-amlogic-${{ needs.build.outputs.pve_version }}.img.gz
+          gzip -dc image/proxmox-ve-amlogic-${{ needs.build.outputs.pve_version }}.img.gz > "$image"
           (( $(stat --format=%s "$image") % 512 == 0 ))
           loop="$(sudo losetup -Pf --show "$image")"
           for _ in {1..10}; do
@@ -186,3 +187,26 @@ jobs:
           test -s "$root/etc/fstab"
           grep -qFx "UUID=$root_uuid / ext4 defaults,noatime 0 1" "$root/etc/fstab"
           test -s "$root/etc/hostname"
+
+  publish:
+    needs: [build, validate]
+    if: ${{ needs.build.result == 'success' && needs.validate.result == 'success' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: proxmox-ve-amlogic-${{ needs.build.outputs.pve_version }}
+          path: image
+
+      - name: Publish flashable image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload "${{ needs.build.outputs.kernel_release }}" \
+            "image/proxmox-ve-amlogic-${{ needs.build.outputs.pve_version }}.img.gz" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber
