@@ -13,7 +13,7 @@ usage() {
     cat <<EOF
 usage: $0 --kernel-deb PATH --runtime-deb PATH [--output PATH] [--stage STAGE] [--reset]
 
-Stages: bootstrap, proxmox, configure, assemble, compress, all, clean
+Stages: bootstrap, proxmox, configure, assemble, all, clean
 EOF
 }
 
@@ -35,7 +35,7 @@ die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 [[ $(id -u) -eq 0 ]] || die "run as root"
 [[ $stage == clean || -s $kernel_deb ]] || die "kernel package not found: $kernel_deb"
 [[ $stage == clean || -s $runtime_deb ]] || die "kernel runtime package not found: $runtime_deb"
-for command in curl dd debootstrap du parted partprobe mkfs.vfat mkfs.ext4 mkimage rsync losetup mount umount zstd; do
+for command in curl dd debootstrap du parted partprobe mkfs.vfat mkfs.ext4 mkimage rsync losetup mount umount; do
     command -v "$command" >/dev/null || die "missing command: $command"
 done
 
@@ -263,7 +263,7 @@ FDT=/dtb/amlogic/meson-sm1-x96-max-plus.dtb
 APPEND=root=UUID=$root_uuid rootflags=data=writeback rw rootwait rootfstype=ext4 console=ttyAML0,115200n8 console=tty0 no_console_suspend consoleblank=0 fsck.fix=yes fsck.repair=yes net.ifnames=0 max_loop=128 cgroup_enable=cpuset cgroup_memory=1 cgroup_enable=memory swapaccount=1 video=HDMI-A-1:1920x1080@60e plymouth.enable=0
 EOF
     image="$work/image.img"
-    rm -f "$image" "$output" "$output.zst" "$state/compress"
+    rm -f "$image" "$output"
     # Leave room for upgrades, then round up to keep partition sizes predictable.
     root_bytes=$(du -sx --apparent-size --block-size=1 "$rootfs" | cut -f1)
     root_bytes=$((root_bytes + root_reserve_gib * 1024 * 1024 * 1024))
@@ -302,15 +302,6 @@ EOF
     printf 'Built %s\n' "$output"
 }
 
-compress() {
-    complete compress && return
-    complete assemble || die "run assemble first"
-    [[ -s "$output" ]] || die "image missing: $output"
-    zstd -q -19 -T0 -f "$output" -o "$output.zst"
-    mark compress
-    printf 'Built %s\n' "$output.zst"
-}
-
 if ((reset)); then
     clean
 fi
@@ -319,8 +310,7 @@ case "$stage" in
     proxmox) proxmox ;;
     configure) configure ;;
     assemble) assemble ;;
-    compress) compress ;;
-    all) bootstrap; proxmox; configure; assemble; compress ;;
+    all) bootstrap; proxmox; configure; assemble ;;
     clean) clean ;;
     *) die "unknown stage: $stage" ;;
 esac

@@ -58,7 +58,7 @@ jobs:
       - name: Install image build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y debootstrap dosfstools e2fsprogs parted rsync u-boot-tools zstd
+          sudo apt-get install -y debootstrap dosfstools e2fsprogs parted rsync u-boot-tools
 
       - name: Build kernel runtime package
         run: |
@@ -111,23 +111,15 @@ jobs:
             --output "dist/$IMAGE_NAME.img" \
             --stage assemble
 
-      - name: Compress disk image
-        run: |
-          sudo bash tools/build-pve-image.sh \
-            --kernel-deb "$KERNEL_DEB" \
-            --runtime-deb runtime/proxmox-amlogic-kernel-runtime_1.0_all.deb \
-            --output "dist/$IMAGE_NAME.img" \
-            --stage compress
-
       - name: Upload image artifact
         if: ${{ always() && steps.pve.outputs.version != '' }}
         uses: actions/upload-artifact@v7
         with:
           name: proxmox-ve-amlogic-${{ steps.pve.outputs.version }}
-          path: dist/proxmox-ve-amlogic-${{ steps.pve.outputs.version }}.img.zst
+          path: dist/proxmox-ve-amlogic-${{ steps.pve.outputs.version }}.img
           if-no-files-found: warn
           retention-days: 14
-          # The image is already compressed with zstd.
+          # GitHub delivers artifacts as ZIP files; avoid a nested archive.
           compression-level: 0
 
   validate:
@@ -147,19 +139,17 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq parted zstd
-          image="$(mktemp --suffix=.img)"
+          sudo apt-get install -y -qq parted
+          image="image/proxmox-ve-amlogic-${{ needs.build.outputs.pve_version }}.img"
           boot="$(mktemp -d)"
           root="$(mktemp -d)"
           loop=""
           cleanup() {
             sudo umount "$boot" "$root" 2>/dev/null || true
             [ -z "$loop" ] || sudo losetup -d "$loop" 2>/dev/null || true
-            rm -rf "$boot" "$root" "$image"
+            rm -rf "$boot" "$root"
           }
           trap cleanup EXIT
-          zstd -q -t image/proxmox-ve-amlogic-${{ needs.build.outputs.pve_version }}.img.zst
-          zstd -q -d -f image/proxmox-ve-amlogic-${{ needs.build.outputs.pve_version }}.img.zst -o "$image"
           (( $(stat --format=%s "$image") % 512 == 0 ))
           loop="$(sudo losetup -Pf --show "$image")"
           for _ in {1..10}; do
