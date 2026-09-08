@@ -2,8 +2,8 @@ name: Build PVE Kernel
 
 on:
   schedule:
-    # Poll git.proxmox.com for a new pve-kernel release daily. The build is
-    # skipped unless the resolved version is not yet published in this repo.
+    # Poll the normal Proxmox APT channel daily. The build is skipped unless
+    # its newest published kernel version is not yet released in this repo.
     - cron: '22 03 * * *'
   workflow_dispatch:
     inputs:
@@ -11,10 +11,6 @@ on:
         description: Rebuild even if this version already released
         type: boolean
         default: false
-      pve_head:
-        description: 'Optional pve-kernel commit SHA to build (default: latest release commit)'
-        type: string
-        default: ''
 
 permissions:
   contents: write
@@ -32,32 +28,62 @@ jobs:
       pve_version: ${{ steps.detect.outputs.PVE_VERSION }}
       pve_head: ${{ steps.detect.outputs.PVE_HEAD }}
     steps:
-      - name: Resolve PVE release
+      - name: Resolve published PVE kernel release
         id: detect
         env:
           GH_TOKEN: ${{ github.token }}
-          PVE_HEAD_INPUT: ${{ inputs.pve_head }}
         run: |
           set -euo pipefail
+          PVE_APT_URL="http://download.proxmox.com/debian/pve/dists/trixie/pve-no-subscription/binary-amd64/Packages.gz"
           PVE_GIT_URL="https://git.proxmox.com/git/pve-kernel.git"
-          PVE_HEAD="${PVE_HEAD_INPUT}"
-          if [ -z "${PVE_HEAD}" ]; then
-            PVE_HEAD="$(git ls-remote "${PVE_GIT_URL}" HEAD | awk '{print $1}')"
-          fi
+
+          package=""
+          version=""
+          PVE_VERSION=""
+          while IFS= read -r line || [ -n "${line}" ]; do
+            case "${line}" in
+              "Package: proxmox-kernel-"[0-9]*.[0-9]*)
+                package="${line#Package: }"
+                version=""
+                ;;
+              "Version: "*) version="${line#Version: }" ;;
+              "")
+                if [ -n "${version}" ] && [[ "${package}" =~ ^proxmox-kernel-[0-9]+\.[0-9]+$ ]] \
+                  && { [ -z "${PVE_VERSION}" ] || dpkg --compare-versions "${version}" gt "${PVE_VERSION}"; }; then
+                  PVE_VERSION="${version}"
+                fi
+                package=""
+                version=""
+                ;;
+            esac
+          done < <(curl --fail --silent --show-error "${PVE_APT_URL}" | gzip -dc)
+          [ -n "${PVE_VERSION}" ] || {
+            echo "FATAL: no published Proxmox kernel version found" >&2
+            exit 1
+          }
+          PVE_VERSION="${PVE_VERSION}-pve"
+
           CLONE="${RUNNER_TEMP}/pve-lite"
-          git clone --quiet --depth 1 --no-tags "${PVE_GIT_URL}" "${CLONE}"
-          if [ "$(git -C "${CLONE}" rev-parse HEAD)" != "${PVE_HEAD}" ]; then
-            git -C "${CLONE}" fetch --quiet --depth 1 origin "${PVE_HEAD}"
-            git -C "${CLONE}" checkout --quiet FETCH_HEAD
-          fi
-          KERNEL_MAJ="$(sed -n 's/^KERNEL_MAJ=//p' "${CLONE}/Makefile")"
-          KERNEL_MIN="$(sed -n 's/^KERNEL_MIN=//p' "${CLONE}/Makefile")"
-          KERNEL_PATCHLEVEL="$(sed -n 's/^KERNEL_PATCHLEVEL=//p' "${CLONE}/Makefile")"
-          KERNEL_VER="${KERNEL_MAJ}.${KERNEL_MIN}.${KERNEL_PATCHLEVEL}"
-          KREL="$(sed -n 's/^KREL=//p' "${CLONE}/Makefile")"
-          KREL_EXTRA="$(sed -n 's/^KREL_EXTRA=//p' "${CLONE}/Makefile")"
-          PVE_VERSION="${KERNEL_VER}-${KREL}${KREL_EXTRA}-pve"
-          echo "KERNEL_VER=${KERNEL_VER}" >> "${GITHUB_OUTPUT}"
+          git clone --quiet --depth 1000 --no-tags "${PVE_GIT_URL}" "${CLONE}"
+          PVE_HEAD=""
+          for commit in $(git -C "${CLONE}" rev-list HEAD); do
+            makefile="$(git -C "${CLONE}" show "${commit}:Makefile")" || continue
+            kernel_maj="$(printf '%s\n' "${makefile}" | sed -n 's/^KERNEL_MAJ=//p')"
+            kernel_min="$(printf '%s\n' "${makefile}" | sed -n 's/^KERNEL_MIN=//p')"
+            kernel_patchlevel="$(printf '%s\n' "${makefile}" | sed -n 's/^KERNEL_PATCHLEVEL=//p')"
+            krel="$(printf '%s\n' "${makefile}" | sed -n 's/^KREL=//p')"
+            krel_extra="$(printf '%s\n' "${makefile}" | sed -n 's/^KREL_EXTRA=//p')"
+            if [ "${kernel_maj}.${kernel_min}.${kernel_patchlevel}-${krel}${krel_extra}-pve" = "${PVE_VERSION}" ]; then
+              PVE_HEAD="${commit}"
+              break
+            fi
+          done
+          [ -n "${PVE_HEAD}" ] || {
+            echo "FATAL: no pve-kernel Git commit found for ${PVE_VERSION}" >&2
+            exit 1
+          }
+
+          echo "::notice:: selected ${PVE_VERSION} from pve-no-subscription at ${PVE_HEAD}"
           echo "PVE_VERSION=${PVE_VERSION}" >> "${GITHUB_OUTPUT}"
           echo "PVE_HEAD=${PVE_HEAD}" >> "${GITHUB_OUTPUT}"
           FORCE="${{ inputs.force && '1' || '0' }}"
