@@ -46,10 +46,7 @@ The workflow produces a compressed full-disk image artifact. Flash it to a USB
 drive or SD card to boot the device, then use the included installer to copy it
 to eMMC.
 
-The image boots directly into the latest available Proxmox VE packages. Its
-initial hostname is `pve`, its credentials are `root` / `root`, and `vmbr0`
-uses DHCP. Change the hostname, root password, and network configuration after
-installation.
+The image boots directly into the latest available Proxmox VE packages.
 
 ## Kernel Cleanup
 

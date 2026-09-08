@@ -50,12 +50,47 @@ root_align_mib=${IMG_ROOT_ALIGN_MIB:-256}
 [[ $root_align_mib =~ ^[1-9][0-9]*$ ]] || die "IMG_ROOT_ALIGN_MIB must be a positive integer"
 mirror=${DEBIAN_MIRROR:-http://deb.debian.org/debian}
 proxmox_key_url=${PROXMOX_KEY_URL:-https://enterprise.proxmox.com/debian/proxmox-archive-keyring-trixie.gpg}
-hostname=${PVE_HOSTNAME:-pve}
-domain=${PVE_DOMAIN:-localdomain}
+root_password=${PVE_ROOT_PASSWORD:-}
+hostname=${PVE_HOSTNAME:-}
+domain=${PVE_DOMAIN:-}
+ipv4_cidr=${PVE_IPV4_CIDR:-}
+gateway=${PVE_GATEWAY:-}
+dns_server=${PVE_DNS_SERVER:-}
+fqdn=""
 loop=""
 
 mark() { touch "$state/$1"; }
 complete() { [[ -e "$state/$1" ]]; }
+valid_ipv4() {
+    local address=$1 octet
+    local -a octets
+    [[ $address =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+    IFS=. read -r -a octets <<<"$address"
+    for octet in "${octets[@]}"; do
+        ((10#$octet <= 255)) || return 1
+    done
+}
+valid_domain() {
+    local label
+    local -a labels
+    IFS=. read -r -a labels <<<"$1"
+    ((${#labels[@]} > 0)) || return 1
+    for label in "${labels[@]}"; do
+        [[ $label =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$ ]] || return 1
+    done
+}
+validate_configuration() {
+    local address prefix extra
+    [[ -n $root_password && $root_password != *:* && $root_password != *$'\n'* ]] || die "PVE_ROOT_PASSWORD must not be empty or contain ':'"
+    [[ $hostname =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$ ]] || die "invalid PVE_HOSTNAME"
+    valid_domain "$domain" || die "invalid PVE_DOMAIN"
+    IFS=/ read -r address prefix extra <<<"$ipv4_cidr"
+    [[ -n $address && -n $prefix && -z ${extra:-} && $prefix =~ ^[0-9]+$ ]] || die "PVE_IPV4_CIDR must be an IPv4 address with a prefix length"
+    valid_ipv4 "$address" && ((10#$prefix <= 32)) || die "invalid PVE_IPV4_CIDR"
+    valid_ipv4 "$gateway" || die "invalid PVE_GATEWAY"
+    valid_ipv4 "$dns_server" || die "invalid PVE_DNS_SERVER"
+    fqdn="$hostname.$domain"
+}
 chroot_exec() {
     chroot "$rootfs" env DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 LC_ALL=C.UTF-8 "$@"
 }
@@ -80,6 +115,40 @@ cleanup() {
 }
 trap cleanup EXIT
 
+write_target_identity() {
+    printf '%s\n' "$hostname" > "$rootfs/etc/hostname"
+    cat > "$rootfs/etc/hosts" <<EOF
+127.0.0.1 localhost.localdomain localhost
+::1 localhost ip6-localhost ip6-loopback
+${ipv4_cidr%/*} $fqdn $hostname
+EOF
+    printf '%s\n' "$fqdn" > "$rootfs/etc/mailname"
+    mkdir -p "$rootfs/etc/network"
+    cat > "$rootfs/etc/network/interfaces" <<EOF
+auto lo
+iface lo inet loopback
+
+iface eth0 inet manual
+
+auto vmbr0
+iface vmbr0 inet static
+    address $ipv4_cidr
+    gateway $gateway
+    dns-nameservers $dns_server
+    bridge-ports eth0
+    bridge-stp off
+    bridge-fd 0
+EOF
+    printf 'root:%s\n' "$root_password" | chroot_exec chpasswd
+}
+
+write_target_dns() {
+    cat > "$rootfs/etc/resolv.conf" <<EOF
+search $domain
+nameserver $dns_server
+EOF
+}
+
 clean() {
     unmount_chroot
     rm -rf "$work"
@@ -92,6 +161,9 @@ bootstrap() {
         debootstrap --arch=arm64 --variant=minbase trixie "$rootfs" "$mirror"
     fi
     mount_chroot
+    write_target_identity
+    # Package downloads use the runner resolver. The target resolver is written
+    # after package installation so a private target DNS server cannot break CI.
     cp /etc/resolv.conf "$rootfs/etc/resolv.conf"
     cat > "$rootfs/usr/sbin/policy-rc.d" <<'EOF'
 #!/bin/sh
@@ -109,7 +181,7 @@ EOF
     chroot_exec apt-get install -y -qq \
         /tmp/proxmox-amlogic-kernel-runtime.deb /tmp/kernel.deb \
         ca-certificates locales kmod initramfs-tools u-boot-tools \
-        openssh-server chrony cron postfix iputils-ping parted bsdextrautils tar dosfstools \
+        openssh-server chrony cron postfix iputils-ping nano dialog parted bsdextrautils tar dosfstools \
         e2fsprogs fdisk util-linux rsync
     rm -f "$rootfs/tmp/kernel.deb" "$rootfs/tmp/proxmox-amlogic-kernel-runtime.deb"
     mark bootstrap
@@ -187,35 +259,19 @@ configure() {
     [[ -s "$dtb" ]] || die "kernel DTB missing for $release"
     [[ -s "$state/root-uuid" ]] || cat /proc/sys/kernel/random/uuid > "$state/root-uuid"
     root_uuid=$(<"$state/root-uuid")
-    printf '%s\n' "$hostname" > "$rootfs/etc/hostname"
-    printf '%s.%s\n' "$hostname" "$domain" > "$rootfs/etc/mailname"
-    cat > "$rootfs/etc/hosts" <<EOF
-127.0.0.1 localhost.localdomain localhost
-::1 localhost ip6-localhost ip6-loopback
-127.0.1.1 $hostname.$domain $hostname
-EOF
     cat > "$rootfs/etc/fstab" <<EOF
 UUID=$root_uuid / ext4 defaults,noatime 0 1
 LABEL=BOOT /boot vfat defaults 0 2
 tmpfs /tmp tmpfs defaults,nosuid 0 0
 EOF
-    mkdir -p "$rootfs/etc/network" "$rootfs/etc/ssh/sshd_config.d" "$rootfs/etc/systemd/system/getty.target.wants"
-    cat > "$rootfs/etc/network/interfaces" <<'EOF'
-auto lo
-iface lo inet loopback
-
-iface eth0 inet manual
-
-auto vmbr0
-iface vmbr0 inet dhcp
-    bridge-ports eth0
-    bridge-stp off
-    bridge-fd 0
-EOF
+    mkdir -p "$rootfs/etc/ssh/sshd_config.d" "$rootfs/etc/systemd/system/getty.target.wants"
+    # ifupdown2 generated this from the build runner's NICs; it would replace
+    # the target configuration on first boot.
+    rm -f "$rootfs/etc/network/interfaces.new"
     printf 'PermitRootLogin yes\n' > "$rootfs/etc/ssh/sshd_config.d/99-root.conf"
     ln -sf /lib/systemd/system/serial-getty@.service "$rootfs/etc/systemd/system/getty.target.wants/serial-getty@ttyAML0.service"
-    printf 'root:root\n' | chroot_exec chpasswd
-    chroot_exec postconf -e "myhostname = $hostname.$domain"
+    write_target_dns
+    chroot_exec postconf -e "myhostname = $fqdn"
     chroot_exec postconf -e 'inet_interfaces = loopback-only'
     chroot_exec postconf -e 'mydestination = $myhostname, localhost.$mydomain, localhost'
     : > "$rootfs/etc/machine-id"
@@ -301,6 +357,10 @@ EOF
     mark assemble
     printf 'Built %s\n' "$output"
 }
+
+if [[ $stage != clean ]]; then
+    validate_configuration
+fi
 
 if ((reset)); then
     clean

@@ -15,7 +15,7 @@ usage() {
     cat <<'EOF'
 Usage: install-to-emmc [--dry-run] [--target /dev/mmcblkN]
 
-Install the running X96 Max+ USB system to inactive eMMC.
+Install the running system to inactive eMMC.
 
 Options:
   --dry-run              Validate inputs and print the write plan only
@@ -58,7 +58,8 @@ done
 [[ $(dd if=/boot/zImage bs=1 skip=56 count=4 status=none | od -An -tx1 | tr -d '[:space:]') == 41524d64 ]] \
     || die "zImage is not a raw ARM64 Image"
 
-root_disk=$(findmnt -no PKNAME / || true)
+root_source=$(findmnt -no SOURCE / || true)
+root_disk=$(lsblk -no PKNAME "$root_source" 2>/dev/null || true)
 [[ -n "$root_disk" ]] || die "cannot determine the running root disk"
 
 if [[ -z "$target" ]]; then
@@ -90,7 +91,7 @@ if ((dry_run)); then
     info "  2. Unmount and remove existing Linux partitions on $target."
     info "  3. Run ampart dclone and verify its data::-1:4 snapshot."
     info "     Verified ampart layout: boot 117 MiB..628 MiB, root 629 MiB..end."
-    info "     Fallback X96 Max+ layout: boot 68 MiB..579 MiB, root 1350 MiB..end."
+    info "     Fallback layout: boot 68 MiB..579 MiB, root 1350 MiB..end."
     info "  4. Create FAT32 BOOT_EMMC and ext4 ROOTFS_EMMC partitions."
     info "  5. Write the mainline U-Boot payload and format both partitions."
     info "  6. Copy the running boot and root filesystems, then update uEnv.txt and fstab."
@@ -134,10 +135,10 @@ if "$ampart" "$target" --mode dclone data::-1:4 >/dev/null 2>&1; then
         root_start=629
         info "Verified ampart layout: boot ${boot_start} MiB, root ${root_start} MiB"
     else
-        info "ampart snapshot was not verified; using the X96 Max+ fallback layout"
+        info "ampart snapshot was not verified; using the fallback layout"
     fi
 else
-    info "ampart did not prepare this eMMC; using the X96 Max+ fallback layout"
+    info "ampart did not prepare this eMMC; using the fallback layout"
 fi
 
 info "3/6 Partitioning and formatting eMMC"

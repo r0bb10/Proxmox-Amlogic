@@ -8,6 +8,36 @@ on:
         required: false
         default: ''
         type: string
+      root_password:
+        description: Root account password
+        required: true
+        default: root
+        type: string
+      hostname:
+        description: Proxmox hostname
+        required: true
+        default: pve
+        type: string
+      domain:
+        description: DNS domain
+        required: true
+        default: localdomain
+        type: string
+      ipv4_cidr:
+        description: Static vmbr0 IPv4 address and prefix length
+        required: true
+        default: 192.168.1.2/24
+        type: string
+      gateway:
+        description: Static vmbr0 IPv4 gateway
+        required: true
+        default: 192.168.1.1
+        type: string
+      dns_server:
+        description: DNS server for the installed image
+        required: true
+        default: 192.168.1.1
+        type: string
 
 concurrency:
   group: pve-amlogic-image
@@ -19,6 +49,13 @@ jobs:
     timeout-minutes: 360
     permissions:
       contents: read
+    env:
+      PVE_ROOT_PASSWORD: ${{ inputs.root_password }}
+      PVE_HOSTNAME: ${{ inputs.hostname }}
+      PVE_DOMAIN: ${{ inputs.domain }}
+      PVE_IPV4_CIDR: ${{ inputs.ipv4_cidr }}
+      PVE_GATEWAY: ${{ inputs.gateway }}
+      PVE_DNS_SERVER: ${{ inputs.dns_server }}
     outputs:
       pve_version: ${{ steps.pve.outputs.version }}
     steps:
@@ -68,7 +105,7 @@ jobs:
 
       - name: Bootstrap root filesystem
         run: |
-          sudo bash tools/build-pve-image.sh \
+          sudo --preserve-env=PVE_ROOT_PASSWORD,PVE_HOSTNAME,PVE_DOMAIN,PVE_IPV4_CIDR,PVE_GATEWAY,PVE_DNS_SERVER bash tools/build-pve-image.sh \
             --kernel-deb "$KERNEL_DEB" \
             --runtime-deb runtime/proxmox-amlogic-kernel-runtime_1.0_all.deb \
             --output dist/proxmox-ve-amlogic.img \
@@ -77,7 +114,7 @@ jobs:
 
       - name: Install Proxmox VE packages
         run: |
-          sudo bash tools/build-pve-image.sh \
+          sudo --preserve-env=PVE_ROOT_PASSWORD,PVE_HOSTNAME,PVE_DOMAIN,PVE_IPV4_CIDR,PVE_GATEWAY,PVE_DNS_SERVER bash tools/build-pve-image.sh \
             --kernel-deb "$KERNEL_DEB" \
             --runtime-deb runtime/proxmox-amlogic-kernel-runtime_1.0_all.deb \
             --output dist/proxmox-ve-amlogic.img \
@@ -97,7 +134,7 @@ jobs:
 
       - name: Configure image root filesystem
         run: |
-          sudo bash tools/build-pve-image.sh \
+          sudo --preserve-env=PVE_ROOT_PASSWORD,PVE_HOSTNAME,PVE_DOMAIN,PVE_IPV4_CIDR,PVE_GATEWAY,PVE_DNS_SERVER bash tools/build-pve-image.sh \
             --kernel-deb "$KERNEL_DEB" \
             --runtime-deb runtime/proxmox-amlogic-kernel-runtime_1.0_all.deb \
             --output "dist/$IMAGE_NAME.img" \
@@ -105,7 +142,7 @@ jobs:
 
       - name: Assemble raw disk image
         run: |
-          sudo bash tools/build-pve-image.sh \
+          sudo --preserve-env=PVE_ROOT_PASSWORD,PVE_HOSTNAME,PVE_DOMAIN,PVE_IPV4_CIDR,PVE_GATEWAY,PVE_DNS_SERVER bash tools/build-pve-image.sh \
             --kernel-deb "$KERNEL_DEB" \
             --runtime-deb runtime/proxmox-amlogic-kernel-runtime_1.0_all.deb \
             --output "dist/$IMAGE_NAME.img" \
@@ -119,8 +156,8 @@ jobs:
           path: dist/proxmox-ve-amlogic-${{ steps.pve.outputs.version }}.img
           if-no-files-found: warn
           retention-days: 14
-          # GitHub delivers artifacts as ZIP files; avoid a nested archive.
-          compression-level: 0
+          # Keep one ZIP wrapper around the raw image, rather than nesting an archive.
+          compression-level: 6
 
   validate:
     needs: build
@@ -128,6 +165,12 @@ jobs:
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
+    env:
+      PVE_HOSTNAME: ${{ inputs.hostname }}
+      PVE_DOMAIN: ${{ inputs.domain }}
+      PVE_IPV4_CIDR: ${{ inputs.ipv4_cidr }}
+      PVE_GATEWAY: ${{ inputs.gateway }}
+      PVE_DNS_SERVER: ${{ inputs.dns_server }}
     steps:
       - name: Download image artifact
         uses: actions/download-artifact@v8
@@ -175,4 +218,11 @@ jobs:
           test -x "$root/usr/sbin/install-to-emmc"
           test -s "$root/etc/fstab"
           grep -qFx "UUID=$root_uuid / ext4 defaults,noatime 0 1" "$root/etc/fstab"
-          test -s "$root/etc/hostname"
+          fqdn="$PVE_HOSTNAME.$PVE_DOMAIN"
+          sudo grep -qFx "$PVE_HOSTNAME" "$root/etc/hostname"
+          grep -qFx "${PVE_IPV4_CIDR%/*} $fqdn $PVE_HOSTNAME" "$root/etc/hosts"
+          grep -qFx "iface vmbr0 inet static" "$root/etc/network/interfaces"
+          grep -qFx "    address $PVE_IPV4_CIDR" "$root/etc/network/interfaces"
+          grep -qFx "    gateway $PVE_GATEWAY" "$root/etc/network/interfaces"
+          grep -qFx "    dns-nameservers $PVE_DNS_SERVER" "$root/etc/network/interfaces"
+          grep -qFx "nameserver $PVE_DNS_SERVER" "$root/etc/resolv.conf"
