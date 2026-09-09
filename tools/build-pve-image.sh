@@ -138,6 +138,8 @@ iface vmbr0 inet static
     bridge-ports eth0
     bridge-stp off
     bridge-fd 0
+
+source /etc/network/interfaces.d/*
 EOF
     printf 'root:%s\n' "$root_password" | chroot_exec chpasswd
 }
