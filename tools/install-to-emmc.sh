@@ -98,9 +98,13 @@ if ((dry_run)); then
     exit 0
 fi
 
-printf 'Type INSTALL %s to erase and install to this eMMC: ' "$target"
+printf 'WARNING: this permanently erases %s.\n' "$target"
+printf 'Are you sure you want to flash %s? [y/N] ' "$target"
 read -r confirmation
-[[ $confirmation == "INSTALL $target" ]] || die "installation cancelled"
+case "$confirmation" in
+    y|Y) ;;
+    *) die "installation cancelled" ;;
+esac
 
 backup_valid() {
     [[ -s $backup ]] || return 1
@@ -188,7 +192,8 @@ mount "${target}p2" "$work/root"
 mkdir -p "$work/root"/{boot,dev,media,mnt,proc,run,sys,tmp}
 chmod 1777 "$work/root/tmp"
 for directory in etc home opt root selinux srv usr var; do
-    [[ -d /$directory ]] && tar -C / -cf - "$directory" | tar -C "$work/root" -xpf -
+    # Do not traverse or archive the live lxcfs mount under /var.
+    [[ -d /$directory ]] && tar --warning=no-file-ignored --exclude=var/lib/lxcfs --one-file-system -C / -cf - "$directory" | tar -C "$work/root" -xpf -
 done
 ln -s usr/bin "$work/root/bin"
 ln -s usr/lib "$work/root/lib"

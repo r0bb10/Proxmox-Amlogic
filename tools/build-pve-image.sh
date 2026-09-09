@@ -181,7 +181,8 @@ EOF
     chroot_exec apt-get install -y -qq \
         /tmp/proxmox-amlogic-kernel-runtime.deb /tmp/kernel.deb \
         ca-certificates locales kmod initramfs-tools u-boot-tools \
-        openssh-server chrony cron postfix iputils-ping nano dialog parted bsdextrautils tar dosfstools \
+        openssh-server chrony cron postfix console-setup keyboard-configuration ipvsadm \
+        iputils-ping nano dialog parted bsdextrautils tar dosfstools \
         e2fsprogs fdisk util-linux rsync
     rm -f "$rootfs/tmp/kernel.deb" "$rootfs/tmp/proxmox-amlogic-kernel-runtime.deb"
     mark bootstrap
