@@ -1,0 +1,62 @@
+# Personal X96 Max+ server profile. The box has no PCI devices; disabling PCI
+# also removes the PCI-only GPU, server NIC, HBA, and Fibre Channel drivers.
+-d CONFIG_PCI
+
+# This direct U-Boot/device-tree boot path has one fixed, non-NUMA SoC and no
+# device-assignment hardware. USB-attached SATA disks use SCSI/UAS, not libata.
+# Keep EFI enabled because PVE packaging installs its ARM64 vmlinuz.efi output.
+-d CONFIG_ACPI
+-d CONFIG_NUMA
+-d CONFIG_VFIO
+-d CONFIG_ATA
+
+# The PVE ARM64 configuration targets every supported SoC family. This kernel
+# only boots on the Amlogic SM1 platform, so retain CONFIG_ARCH_MESON alone.
+-d CONFIG_ARCH_ACTIONS
+-d CONFIG_ARCH_AIROHA
+-d CONFIG_ARCH_SUNXI
+-d CONFIG_ARCH_APPLE
+-d CONFIG_ARCH_AXIADO
+-d CONFIG_ARCH_BERLIN
+-d CONFIG_ARCH_BITMAIN
+-d CONFIG_ARCH_BLAIZE
+-d CONFIG_ARCH_BST
+-d CONFIG_ARCH_CIX
+-d CONFIG_ARCH_K3
+-d CONFIG_ARCH_LG1K
+-d CONFIG_ARCH_HISI
+-d CONFIG_ARCH_KEEMBAY
+-d CONFIG_ARCH_MEDIATEK
+-d CONFIG_ARCH_MICROCHIP
+-d CONFIG_ARCH_LAN969X
+-d CONFIG_ARCH_SPARX5
+-d CONFIG_ARCH_MMP
+-d CONFIG_ARCH_MVEBU
+-d CONFIG_ARCH_NXP
+-d CONFIG_ARCH_LAYERSCAPE
+-d CONFIG_ARCH_MXC
+-d CONFIG_ARCH_S32
+-d CONFIG_ARCH_MA35
+-d CONFIG_ARCH_NPCM
+-d CONFIG_ARCH_PENSANDO
+-d CONFIG_ARCH_QCOM
+-d CONFIG_ARCH_REALTEK
+-d CONFIG_ARCH_RENESAS
+-d CONFIG_ARCH_ROCKCHIP
+-d CONFIG_ARCH_SEATTLE
+-d CONFIG_ARCH_INTEL_SOCFPGA
+-d CONFIG_ARCH_SOPHGO
+-d CONFIG_ARCH_STM32
+-d CONFIG_ARCH_SYNQUACER
+-d CONFIG_ARCH_TEGRA
+-d CONFIG_ARCH_SPRD
+-d CONFIG_ARCH_THUNDER
+-d CONFIG_ARCH_THUNDER2
+-d CONFIG_ARCH_VEXPRESS
+-d CONFIG_ARCH_VISCONTI
+-d CONFIG_ARCH_XGENE
+-d CONFIG_ARCH_ZYNQMP
+
+# This is a build/test module, not a runtime requirement for Proxmox.
+-d CONFIG_IKHEADERS
+-d CONFIG_TEST_BPF
