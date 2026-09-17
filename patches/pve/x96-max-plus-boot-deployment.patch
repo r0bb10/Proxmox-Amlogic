@@ -133,7 +133,7 @@ diff --git a/debian/rules b/debian/rules
 index 71f9804..981eda3 100755
 --- a/debian/rules
 +++ b/debian/rules
-@@ -92,10 +92,15 @@ binary: install
+@@ -92,10 +92,17 @@ binary: install
  
  .install_mark: .compile_mark .modules_compile_mark
  	rm -rf debian/$(PMX_KERNEL_PKG)
@@ -142,6 +142,8 @@ index 71f9804..981eda3 100755
 -	install -m 644 $(KERNEL_SRC)/.config debian/$(PMX_KERNEL_PKG)/boot/config-$(KVNAME)
 -	install -m 644 $(KERNEL_SRC)/System.map debian/$(PMX_KERNEL_PKG)/boot/System.map-$(KVNAME)
 -	install -m 644 $(KERNEL_SRC)/$(KERNEL_IMAGE_PATH) debian/$(PMX_KERNEL_PKG)/boot/$(KERNEL_INSTALL_FILE)-$(KVNAME)
++	install -d -m 0755 debian/$(PMX_KERNEL_PKG)/boot
++	install -m 644 $(KERNEL_SRC)/.config debian/$(PMX_KERNEL_PKG)/boot/config-$(KVNAME)
 +	install -d -m 0755 debian/$(PMX_KERNEL_PKG)/usr/lib/proxmox-kernel/$(KVNAME)
 +	install -m 644 $(KERNEL_SRC)/.config debian/$(PMX_KERNEL_PKG)/usr/lib/proxmox-kernel/$(KVNAME)/config-$(KVNAME)
 +	install -m 644 $(KERNEL_SRC)/System.map debian/$(PMX_KERNEL_PKG)/usr/lib/proxmox-kernel/$(KVNAME)/System.map-$(KVNAME)
